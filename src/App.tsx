@@ -1,19 +1,16 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { AdminIdleEpicForm } from "./components/AdminIdleEpicForm";
+import { AdminMetricsPanel } from "./components/AdminMetricsPanel";
 import { DirectionSummary } from "./components/DirectionSummary";
 import { EpicIdleSection } from "./components/EpicIdleSection";
 import { HeaderFilters } from "./components/HeaderFilters";
-import { InsightsSection } from "./components/InsightsSection";
 import { RolloutTab } from "./components/RolloutTab";
 import { SidebarTabs, type DashboardTab } from "./components/SidebarTabs";
 import { StageBreakdown } from "./components/StageBreakdown";
 import { StreamCards } from "./components/StreamCards";
 import { StreamStageBreakdown } from "./components/StreamStageBreakdown";
-import { TaskFlagSection } from "./components/TaskFlagSection";
-import { businessStandardItems } from "./data/businessStandards";
 import { mockData } from "./data/mockData";
 import type { Direction, Epic, Period, Stream, Team } from "./types";
-import { getInsights } from "./utils/calculations";
-import { parseJiraWorkbook } from "./utils/xlsxJiraParser";
 
 type DashboardData = {
   direction: Direction;
@@ -28,16 +25,19 @@ type ReportSnapshot = {
   direction: Pick<Direction, "ttm" | "p85" | "average">;
 };
 
+type MetricPatch = Partial<Pick<Direction, "ttm" | "discovery" | "delivery" | "rollout" | "previousTtm">>;
+
 const snapshotStorageKey = "ttm-dashboard-report-snapshots";
+const manualDataStorageKey = "ttm-dashboard-manual-data";
 
-const formatReportDate = (date = new Date()) =>
-  new Intl.DateTimeFormat("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  }).format(date);
+const initialDashboardData: DashboardData = {
+  direction: mockData.direction,
+  streams: mockData.streams,
+  teams: mockData.teams,
+  epics: mockData.epics,
+};
 
-const makeSnapshot = (data: DashboardData, fileName: string, reportDate = formatReportDate()): ReportSnapshot => ({
+const makeSnapshot = (data: DashboardData, fileName: string, reportDate = "21.05.2026"): ReportSnapshot => ({
   reportDate,
   fileName,
   direction: {
@@ -51,92 +51,108 @@ const readSnapshots = () => {
   try {
     const raw = window.localStorage.getItem(snapshotStorageKey);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { current?: ReportSnapshot; previous?: ReportSnapshot };
-    return parsed;
+    return JSON.parse(raw) as { current?: ReportSnapshot; previous?: ReportSnapshot };
   } catch {
     return null;
   }
 };
 
-const writeSnapshots = (snapshots: { current: ReportSnapshot; previous?: ReportSnapshot }) => {
+const readManualData = () => {
   try {
-    window.localStorage.setItem(snapshotStorageKey, JSON.stringify(snapshots));
+    const raw = window.localStorage.getItem(manualDataStorageKey);
+    if (!raw) return null;
+    return JSON.parse(raw) as DashboardData;
   } catch {
-    // История загрузок не критична для работы дашборда: при запрете localStorage просто показываем текущий отчет.
+    return null;
   }
 };
 
+const writeManualData = (data: DashboardData) => {
+  try {
+    window.localStorage.setItem(manualDataStorageKey, JSON.stringify(data));
+  } catch {
+    // Ручной ввод остается доступен даже если браузер запретил localStorage.
+  }
+};
+
+const syncDirectionStreams = (data: Omit<DashboardData, "direction"> & { direction: Direction }) => ({
+  ...data,
+  direction: {
+    ...data.direction,
+    streams: data.streams,
+  },
+});
+
 function App() {
   const [period, setPeriod] = useState<Period>("Q2");
-  const [streamId, setStreamId] = useState("all");
+  const [selectedStreamId, setSelectedStreamId] = useState(() => initialDashboardData.streams[0]?.id ?? "all");
+  const [idleStreamId, setIdleStreamId] = useState("all");
+  const [isAdmin, setIsAdmin] = useState(false);
   const valueType = "Median" as const;
   const [activeTab, setActiveTab] = useState<DashboardTab>("overview");
-  const [dashboardData, setDashboardData] = useState<DashboardData>({
-    direction: mockData.direction,
-    streams: mockData.streams,
-    teams: mockData.teams,
-    epics: mockData.epics,
-  });
-  const [reportSnapshots, setReportSnapshots] = useState(() => {
+  const [dashboardData, setDashboardData] = useState<DashboardData>(() => readManualData() ?? initialDashboardData);
+  const [reportSnapshots] = useState(() => {
     const saved = readSnapshots();
     return {
-      current: saved?.current ?? makeSnapshot({ direction: mockData.direction, streams: mockData.streams, teams: mockData.teams, epics: mockData.epics }, "Встроенная Jira-выгрузка", "21.05.2026"),
+      current: saved?.current ?? makeSnapshot(initialDashboardData, "Встроенные данные"),
       previous: saved?.previous,
     };
   });
-  const [uploadLabel, setUploadLabel] = useState<string>(() => `Данные из последней Jira-выгрузки от ${reportSnapshots.current.reportDate}`);
 
   const { direction, streams, teams, epics } = dashboardData;
   const { tasks } = mockData;
 
-  const handleWorkbookUpload = async (file: File) => {
-    setUploadLabel("Читаю Excel-файл...");
+  useEffect(() => {
+    writeManualData(dashboardData);
+  }, [dashboardData]);
 
-    try {
-      const parsed = await parseJiraWorkbook(file);
-      const nextSnapshot = makeSnapshot(parsed, file.name);
-      const nextSnapshots = {
-        current: nextSnapshot,
-        previous: reportSnapshots.current,
-      };
-      setDashboardData(parsed);
-      setReportSnapshots(nextSnapshots);
-      writeSnapshots(nextSnapshots);
-      setStreamId("all");
-      setActiveTab("overview");
-      setUploadLabel(`Загружено: ${file.name}, дата отчета: ${nextSnapshot.reportDate}, эпиков: ${parsed.epics.length}`);
-    } catch (error) {
-      setUploadLabel(error instanceof Error ? `Не удалось загрузить файл: ${error.message}` : "Не удалось загрузить файл");
-    }
+  const updateDirectionMetrics = (patch: MetricPatch) => {
+    setDashboardData((current) => {
+      const directionNext = { ...current.direction, ...patch };
+      if (patch.ttm !== undefined) {
+        directionNext.p85 = patch.ttm;
+        directionNext.average = patch.ttm;
+      }
+      return syncDirectionStreams({ ...current, direction: directionNext });
+    });
   };
 
-  const visibleStreams = useMemo(
-    () => (streamId === "all" ? streams : streams.filter((stream) => stream.id === streamId)),
-    [streamId, streams],
-  );
+  const updateStreamMetrics = (targetStreamId: string, patch: MetricPatch) => {
+    setDashboardData((current) => {
+      const streamsNext = current.streams.map((stream) => {
+        if (stream.id !== targetStreamId) return stream;
+        const streamNext = { ...stream, ...patch };
+        if (patch.ttm !== undefined) {
+          streamNext.p85 = patch.ttm;
+          streamNext.average = patch.ttm;
+        }
+        return streamNext;
+      });
 
-  const visibleEpics = useMemo(
-    () => (streamId === "all" ? epics : epics.filter((epic) => epic.streamId === streamId)),
-    [streamId, epics],
-  );
+      return syncDirectionStreams({ ...current, streams: streamsNext });
+    });
+  };
 
-  const visibleTasks = useMemo(() => {
-    if (streamId === "all") return tasks;
-    const epicIds = new Set(visibleEpics.map((epic) => epic.id));
-    return tasks.filter((task) => epicIds.has(task.epicId));
-  }, [streamId, tasks, visibleEpics]);
+  const addIdleEpic = (epic: Epic) => {
+    setDashboardData((current) => {
+      const epicsNext = [epic, ...current.epics];
+      const streamsNext = current.streams.map((stream) =>
+        stream.id === epic.streamId ? { ...stream, epics: [epic, ...stream.epics] } : stream,
+      );
 
-  const insights = useMemo(() => getInsights(direction, visibleEpics, visibleTasks), [direction, visibleEpics, visibleTasks]);
-  const selectedForDetails = streamId === "all" ? streams[0]?.id ?? "all" : streamId;
+      return syncDirectionStreams({ ...current, streams: streamsNext, epics: epicsNext });
+    });
+  };
+
+  const visibleStreams = streams;
+  const visibleEpics = epics;
+  const visibleTasks = tasks;
+
+  const selectedForDetails = streams.some((stream) => stream.id === selectedStreamId) ? selectedStreamId : streams[0]?.id ?? "all";
 
   return (
     <div className="min-h-screen bg-surface">
-      <HeaderFilters
-        period={period}
-        uploadLabel={uploadLabel}
-        onPeriodChange={setPeriod}
-        onWorkbookUpload={handleWorkbookUpload}
-      />
+      <HeaderFilters period={period} isAdmin={isAdmin} onAdminToggle={() => setIsAdmin((current) => !current)} onPeriodChange={setPeriod} />
 
       <div className="mx-auto grid max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[260px_minmax(0,1fr)] lg:px-8">
         <SidebarTabs activeTab={activeTab} onTabChange={setActiveTab} />
@@ -150,22 +166,35 @@ function App() {
 
           {activeTab === "overview" ? (
             <>
+              {isAdmin ? (
+                <AdminMetricsPanel
+                  direction={direction}
+                  streams={streams}
+                  onDirectionChange={updateDirectionMetrics}
+                  onStreamChange={updateStreamMetrics}
+                />
+              ) : null}
               <DirectionSummary direction={direction} valueType={valueType} previousSnapshot={reportSnapshots.previous} />
               <StageBreakdown title="Дирекция" source={direction} />
-              <StreamCards streams={visibleStreams} selectedStreamId={selectedForDetails} valueType={valueType} onSelect={setStreamId} />
+              <StreamCards streams={visibleStreams} selectedStreamId={selectedForDetails} valueType={valueType} onSelect={setSelectedStreamId} />
               <StreamStageBreakdown streams={visibleStreams} selectedStreamId={selectedForDetails} />
             </>
           ) : null}
 
           {activeTab === "idle" ? (
             <>
-              <EpicIdleSection epics={visibleEpics} streams={streams} tasks={visibleTasks} />
-              <TaskFlagSection tasks={visibleTasks} epics={visibleEpics} teams={teams} />
-              <InsightsSection insights={insights} />
+              {isAdmin ? <AdminIdleEpicForm period={period} streams={streams} onAdd={addIdleEpic} /> : null}
+              <EpicIdleSection
+                epics={visibleEpics}
+                streams={streams}
+                tasks={visibleTasks}
+                selectedStreamId={idleStreamId}
+                onStreamChange={setIdleStreamId}
+              />
             </>
           ) : null}
 
-          {activeTab === "rollout" ? <RolloutTab items={businessStandardItems} /> : null}
+          {activeTab === "rollout" ? <RolloutTab items={[]} streams={streams} isAdmin={isAdmin} /> : null}
         </main>
       </div>
     </div>

@@ -251,6 +251,48 @@ const findSheetPath = async (buffer: ArrayBuffer, entries: Map<string, ZipEntry>
   return target.startsWith("/") ? target.slice(1) : `xl/${target.replace(/^xl\//, "")}`;
 };
 
+const findSheetPaths = async (buffer: ArrayBuffer, entries: Map<string, ZipEntry>) => {
+  const workbookXml = await readZipText(buffer, entries, "xl/workbook.xml");
+  const workbookRels = await readZipText(buffer, entries, "xl/_rels/workbook.xml.rels");
+  const workbook = new DOMParser().parseFromString(workbookXml, "application/xml");
+  const rels = new DOMParser().parseFromString(workbookRels, "application/xml");
+  const relations = new Map(
+    Array.from(rels.getElementsByTagName("Relationship")).map((item) => [
+      item.getAttribute("Id") ?? "",
+      item.getAttribute("Target") ?? "",
+    ]),
+  );
+
+  const paths = Array.from(workbook.getElementsByTagName("sheet")).flatMap((sheet) => {
+    const relationId = sheet.getAttribute("r:id");
+    const target = relationId ? relations.get(relationId) : undefined;
+    if (!target) return [];
+    return [target.startsWith("/") ? target.slice(1) : `xl/${target.replace(/^xl\//, "")}`];
+  });
+
+  return paths.length ? paths : [await findSheetPath(buffer, entries)];
+};
+
+const hasJiraHeaders = (rows: unknown[][]) => {
+  const header = rows[0]?.map((value) => String(value ?? "").trim()) ?? [];
+  return ["Код", "Тема", "Продукт", "T2M_p_Dash"].every((name) => header.includes(name));
+};
+
+const looksLikeDashMetrics = (rows: unknown[][]) =>
+  rows.some((row) => {
+    const text = row.map((value) => String(value ?? "").trim()).join(" ");
+    return text.includes("Портфель:") || text.includes("Уровень структуры") || text.includes("Код карточки в PPM");
+  });
+
+const rowsFromHeader = (rows: unknown[][]) => {
+  const headerIndex = rows.findIndex((row) => {
+    const header = row.map((value) => String(value ?? "").trim());
+    return ["Код", "Тема", "Продукт", "T2M_p_Dash"].every((name) => header.includes(name));
+  });
+
+  return headerIndex >= 0 ? rows.slice(headerIndex) : rows;
+};
+
 export const buildDashboardFromJiraRows = (rows: unknown[][]) => {
   const header = rows[0].map((value) => String(value ?? "").trim());
   const indexByName = new Map(header.map((name, index) => [name, index]));
@@ -385,9 +427,22 @@ export const parseJiraWorkbook = async (file: File) => {
   const buffer = await file.arrayBuffer();
   const entries = readZipEntries(buffer);
   const sharedStrings = parseSharedStrings(await readZipText(buffer, entries, "xl/sharedStrings.xml"));
-  const sheetPath = await findSheetPath(buffer, entries);
-  const sheetXml = await readZipText(buffer, entries, sheetPath);
-  const rows = parseSheetRows(sheetXml, sharedStrings);
+  const sheetPaths = await findSheetPaths(buffer, entries);
+  let foundDashMetrics = false;
 
-  return buildDashboardFromJiraRows(rows);
+  for (const sheetPath of sheetPaths) {
+    const sheetXml = await readZipText(buffer, entries, sheetPath);
+    const rows = rowsFromHeader(parseSheetRows(sheetXml, sharedStrings));
+    foundDashMetrics ||= looksLikeDashMetrics(rows);
+    if (!hasJiraHeaders(rows)) continue;
+
+    const dashboard = buildDashboardFromJiraRows(rows);
+    if (dashboard.direction.ttm > 0 || dashboard.epics.length > 0) return dashboard;
+  }
+
+  if (foundDashMetrics) {
+    throw new Error("Загружен отчет DASH Метрики. Для обновления TTM нужен Jira/PPM-файл вида Вер_2_PPM_Дирекции с колонками Код, Тема, Продукт, T2M_p_Dash, TTDisc, TTD и TTRollout.");
+  }
+
+  throw new Error("В файле не найден лист с TTM-таблицей Jira. Проверь, что в выгрузке есть колонки Код, Тема, Продукт и T2M_p_Dash.");
 };

@@ -47,6 +47,8 @@ export interface Epic {
   daysInProgress: number;
   daysWithoutActivity: number;
   linkedTasks: string[];
+  manualLinkedTaskCount?: number;
+  manualStreamName?: string;
 }
 
 export interface BusinessStandardItem {

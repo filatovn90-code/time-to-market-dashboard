@@ -50,7 +50,7 @@ export const getStageBreakdown = (
   }));
 };
 
-export const getEpicIdleStats = (epics: Epic[], idleThreshold = 14) => {
+export const getEpicIdleStats = (epics: Epic[], idleThreshold = 10) => {
   const idleEpics = epics
     .filter((epic) => epic.status === "В работе" && epic.daysWithoutActivity >= idleThreshold)
     .sort((a, b) => b.daysWithoutActivity - a.daysWithoutActivity);
