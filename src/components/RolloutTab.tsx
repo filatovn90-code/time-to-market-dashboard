@@ -23,6 +23,7 @@ type InfluenceDraft = Record<string, { metrics: InfluenceMetric[] }>;
 
 const influenceStorageKey = "ttm-rollout-metrics";
 const customItemsStorageKey = "ttm-business-standard-items";
+const streamInfluenceStorageKey = "ttm-business-standard-stream-metrics";
 
 const quarters = ["2026 Q1", "2026 Q2", "2026 Q3", "2026 Q4"];
 const businessStandardTeams = [
@@ -103,6 +104,7 @@ export function RolloutTab({ items, streams, isAdmin }: RolloutTabProps) {
   const [plannedImpact, setPlannedImpact] = useState("");
   const [actualImpact, setActualImpact] = useState("");
   const [influence, setInfluence] = useState<InfluenceDraft>(() => normalizeStoredInfluence(readJson(influenceStorageKey, {})));
+  const [streamInfluence, setStreamInfluence] = useState<InfluenceDraft>(() => normalizeStoredInfluence(readJson(streamInfluenceStorageKey, {})));
 
   const rows = useMemo<BusinessStandardRow[]>(() => [...customItems, ...items], [customItems, items]);
   const selectedStream = streams.find((stream) => stream.id === streamId) ?? streams[0];
@@ -116,6 +118,10 @@ export function RolloutTab({ items, streams, isAdmin }: RolloutTabProps) {
   useEffect(() => {
     writeJson(influenceStorageKey, influence);
   }, [influence]);
+
+  useEffect(() => {
+    writeJson(streamInfluenceStorageKey, streamInfluence);
+  }, [streamInfluence]);
 
   const visibleItems = useMemo(
     () =>
@@ -141,44 +147,47 @@ export function RolloutTab({ items, streams, isAdmin }: RolloutTabProps) {
   const streamMetricSummary = useMemo(
     () =>
       streams.map((stream) => {
-        const metrics = rows
-          .filter((item) => item.streamName === stream.name)
-          .flatMap((item) =>
-            (influence[item.id]?.metrics ?? []).flatMap((metric) => {
-              const filledMetrics: Array<{ epicTitle: string; type: "planned" | "actual"; value: string }> = [];
-              const planned = metric.plannedImpact.trim();
-              const actual = metric.actualImpact.trim();
-
-              if (planned) {
-                filledMetrics.push({
-                  epicTitle: item.title,
-                  type: "planned",
-                  value: planned,
-                });
-              }
-
-              if (actual) {
-                filledMetrics.push({
-                  epicTitle: item.title,
-                  type: "actual",
-                  value: actual,
-                });
-              }
-
-              return filledMetrics;
-            }),
-          );
+        const metrics = streamInfluence[stream.id]?.metrics ?? [];
+        const filledMetricCount = metrics.filter((metric) => metric.plannedImpact.trim() || metric.actualImpact.trim()).length;
 
         return {
           streamId: stream.id,
           streamName: stream.name,
           metrics,
-          plannedMetrics: metrics.filter((metric) => metric.type === "planned"),
-          actualMetrics: metrics.filter((metric) => metric.type === "actual"),
+          filledMetricCount,
+          plannedMetrics: metrics.filter((metric) => metric.plannedImpact.trim()),
+          actualMetrics: metrics.filter((metric) => metric.actualImpact.trim()),
         };
       }),
-    [streams, rows, influence],
+    [streams, streamInfluence],
   );
+
+  const addStreamMetric = (targetStreamId: string) => {
+    setStreamInfluence((current) => ({
+      ...current,
+      [targetStreamId]: {
+        metrics: [...(current[targetStreamId]?.metrics ?? []), createMetric()],
+      },
+    }));
+  };
+
+  const removeStreamMetric = (targetStreamId: string, metricId: string) => {
+    setStreamInfluence((current) => ({
+      ...current,
+      [targetStreamId]: {
+        metrics: (current[targetStreamId]?.metrics ?? []).filter((metric) => metric.id !== metricId),
+      },
+    }));
+  };
+
+  const updateStreamMetric = (targetStreamId: string, metricId: string, field: "plannedImpact" | "actualImpact", value: string) => {
+    setStreamInfluence((current) => ({
+      ...current,
+      [targetStreamId]: {
+        metrics: (current[targetStreamId]?.metrics ?? []).map((metric) => (metric.id === metricId ? { ...metric, [field]: value } : metric)),
+      },
+    }));
+  };
 
   const getMetrics = (itemId: string) => influence[itemId]?.metrics ?? [];
 
@@ -351,19 +360,61 @@ export function RolloutTab({ items, streams, isAdmin }: RolloutTabProps) {
             <div key={stream.streamId} className="rounded-lg border border-line bg-surface/40 p-4">
               <div className="flex items-start justify-between gap-3">
                 <h3 className="font-semibold text-ink">{stream.streamName}</h3>
-                <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-muted">{stream.metrics.length}</span>
+                <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-muted">{stream.filledMetricCount}</span>
               </div>
-              {stream.metrics.length ? (
+              {isAdmin ? (
+                <div className="mt-3 space-y-3">
+                  {stream.metrics.map((metric) => (
+                    <div key={metric.id} className="rounded-lg bg-white p-3">
+                      <div className="mb-2 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => removeStreamMetric(stream.streamId, metric.id)}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-line bg-white text-muted transition hover:border-red-200 hover:text-red-600"
+                          title="Удалить метрику"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                      <div className="grid gap-3">
+                        <label className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">
+                          Планируемое влияние
+                          <textarea
+                            className="mt-1 min-h-20 w-full resize-y rounded-lg border border-line bg-white px-3 py-2 text-sm font-normal normal-case tracking-normal text-ink outline-none focus:border-ink"
+                            value={metric.plannedImpact}
+                            onChange={(event) => updateStreamMetric(stream.streamId, metric.id, "plannedImpact", event.target.value)}
+                          />
+                        </label>
+                        <label className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">
+                          Фактическое влияние
+                          <textarea
+                            className="mt-1 min-h-20 w-full resize-y rounded-lg border border-line bg-white px-3 py-2 text-sm font-normal normal-case tracking-normal text-ink outline-none focus:border-ink"
+                            value={metric.actualImpact}
+                            onChange={(event) => updateStreamMetric(stream.streamId, metric.id, "actualImpact", event.target.value)}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => addStreamMetric(stream.streamId)}
+                    className="inline-flex items-center gap-2 rounded-lg border border-line bg-white px-3 py-2 text-sm font-semibold text-ink transition hover:border-slate-300"
+                  >
+                    <Plus size={16} />
+                    Добавить метрику
+                  </button>
+                </div>
+              ) : stream.filledMetricCount ? (
                 <div className="mt-3 space-y-3">
                   {stream.plannedMetrics.length ? (
                     <div className="rounded-lg bg-white p-3">
                       <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Планируемое влияние</p>
                       <div className="mt-2 space-y-2">
-                        {stream.plannedMetrics.map((metric, index) => (
-                          <div key={`${metric.epicTitle}-planned-${index}`} className="border-t border-line pt-2 first:border-t-0 first:pt-0">
-                            <p className="break-words text-sm font-medium text-ink">{metric.value}</p>
-                            <p className="mt-1 break-words text-xs text-muted">{metric.epicTitle}</p>
-                          </div>
+                        {stream.plannedMetrics.map((metric) => (
+                          <p key={`${metric.id}-planned`} className="break-words border-t border-line pt-2 text-sm font-medium text-ink first:border-t-0 first:pt-0">
+                            {metric.plannedImpact}
+                          </p>
                         ))}
                       </div>
                     </div>
@@ -372,11 +423,10 @@ export function RolloutTab({ items, streams, isAdmin }: RolloutTabProps) {
                     <div className="rounded-lg bg-white p-3">
                       <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted">Фактическое влияние</p>
                       <div className="mt-2 space-y-2">
-                        {stream.actualMetrics.map((metric, index) => (
-                          <div key={`${metric.epicTitle}-actual-${index}`} className="border-t border-line pt-2 first:border-t-0 first:pt-0">
-                            <p className="break-words text-sm font-medium text-ink">{metric.value}</p>
-                            <p className="mt-1 break-words text-xs text-muted">{metric.epicTitle}</p>
-                          </div>
+                        {stream.actualMetrics.map((metric) => (
+                          <p key={`${metric.id}-actual`} className="break-words border-t border-line pt-2 text-sm font-medium text-ink first:border-t-0 first:pt-0">
+                            {metric.actualImpact}
+                          </p>
                         ))}
                       </div>
                     </div>

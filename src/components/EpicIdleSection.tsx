@@ -11,16 +11,13 @@ interface EpicIdleSectionProps {
   onStreamChange: (streamId: string) => void;
 }
 
-export function EpicIdleSection({ epics, streams, tasks, selectedStreamId, onStreamChange }: EpicIdleSectionProps) {
+export function EpicIdleSection({ epics, streams, selectedStreamId, onStreamChange }: EpicIdleSectionProps) {
   const streamById = new Map(streams.map((stream) => [stream.id, stream.name]));
-  const teamById = new Map(streams.flatMap((stream) => stream.teams.map((team) => [team.id, team.name])));
   const selectedStreamName = streamById.get(selectedStreamId);
   const filteredEpics =
     selectedStreamId === "all"
       ? epics
       : epics.filter((epic) => epic.streamId === selectedStreamId || epic.manualStreamName === selectedStreamName);
-  const filteredEpicIds = new Set(filteredEpics.map((epic) => epic.id));
-  const filteredTasks = selectedStreamId === "all" ? tasks : tasks.filter((task) => filteredEpicIds.has(task.epicId));
   const stats = getEpicIdleStats(filteredEpics);
 
   return (
@@ -69,34 +66,26 @@ export function EpicIdleSection({ epics, streams, tasks, selectedStreamId, onStr
       </div>
 
       <div className="mt-5 overflow-x-auto">
-        <table className="w-full min-w-[760px] border-separate border-spacing-0 text-left text-sm">
+        <table className="w-full min-w-[620px] border-separate border-spacing-0 text-left text-sm">
           <thead>
             <tr className="text-xs uppercase tracking-[0.08em] text-muted">
               <th className="border-b border-line py-3 pr-4">Стрим</th>
-              <th className="border-b border-line px-4">Команда</th>
               <th className="border-b border-line px-4">Эпик</th>
-              <th className="border-b border-line px-4 text-right">В работе</th>
               <th className="border-b border-line px-4 text-right">Без активности</th>
-              <th className="border-b border-line px-4 text-right">Задач</th>
             </tr>
           </thead>
           <tbody>
             {stats.idleEpics.map((epic) => {
-              const linkedTasks = epic.manualLinkedTaskCount ?? filteredTasks.filter((task) => epic.linkedTasks.includes(task.id)).length;
               const streamName = epic.manualStreamName ?? streamById.get(epic.streamId) ?? "Не указан";
-              const teamName = teamById.get(epic.teamId) ?? "Не указана";
 
               return (
                 <tr key={epic.id} className="border-b border-line">
                   <td className="border-b border-line py-3 pr-4 text-ink">{streamName}</td>
-                  <td className="border-b border-line px-4 text-muted">{teamName}</td>
                   <td className="border-b border-line px-4">
                     {epic.key ? <p className="font-semibold text-ink">{epic.key}</p> : null}
                     <p className="text-muted">{epic.title}</p>
                   </td>
-                  <td className="border-b border-line px-4 text-right font-medium">{epic.daysInProgress}</td>
                   <td className="border-b border-line px-4 text-right font-semibold text-red-700">{epic.daysWithoutActivity}</td>
-                  <td className="border-b border-line px-4 text-right">{linkedTasks}</td>
                 </tr>
               );
             })}
